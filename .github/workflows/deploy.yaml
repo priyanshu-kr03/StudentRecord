@@ -1,0 +1,84 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches:
+      - main  # Deploy on push to main branch
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: "us-central1"
+      SERVICE_NAME: "student-record-app"
+      REDIS_PORT: "6379"
+
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up Google Cloud SDK
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          version: 'latest'
+          service_account_key: ${{ secrets.GCP_KEY }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # Step 3: Authenticate Docker with GCP
+      - name: Authenticate Docker with GCP
+        run: |
+          echo ${{ secrets.GCP_KEY }} | docker login -u _json_key --password-stdin https://gcr.io
+
+      # Step 4: Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      # Step 5: Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 6: Build Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }}:latest .
+
+      # Step 7: Push Docker image to Google Container Registry
+      - name: Push Docker image to Google Container Registry
+        run: |
+          docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }}:latest
+
+      # Step 8: Deploy to GCP Cloud Run (or GKE, if using Kubernetes)
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ env.SERVICE_NAME }}:latest \
+            --platform managed \
+            --region ${{ env.GCP_REGION }} \
+            --allow-unauthenticated
+
+      # Step 9: Set up Redis Cache
+      - name: Set up Redis Cache
+        run: |
+          gcloud redis instances create redis-instance \
+            --size=1 --region=${{ env.GCP_REGION }} \
+            --redis-version=redis_6_x --port=$REDIS_PORT
+
+      # Step 10: Get Redis Instance IP and update environment variables
+      - name: Get Redis IP
+        run: |
+          REDIS_IP=$(gcloud redis instances describe redis-instance --region=${{ env.GCP_REGION }} --format='value(host)')
+          echo "REDIS_IP=$REDIS_IP" >> $GITHUB_ENV
+
+      # Step 11: Configure Environment Variables (Database, Cache)
+      - name: Configure Environment Variables
+        run: |
+          gcloud run services update ${{ env.SERVICE_NAME }} \
+            --update-env-vars DB_HOST=${{ secrets.DB_HOST }},REDIS_URL=redis://$REDIS_IP:${{ env.REDIS_PORT }}
